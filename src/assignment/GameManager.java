@@ -20,7 +20,7 @@ public class GameManager implements BoggleGame {
 
     @Override
     public Collection<String> getAllWords() {
-        // TODO - implement me!
+        
         return null;
     }
 
@@ -52,14 +52,11 @@ public class GameManager implements BoggleGame {
         } else {
             System.err.println("Must be GameDictionary");
         }
-
-        
     }
 
     @Override
     public void setGame(char[][] board) {
         // TODO - implement me!
-
     }
 
     @Override

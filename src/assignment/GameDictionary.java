@@ -4,22 +4,38 @@ import java.io.BufferedReader;
 import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
 
 public class GameDictionary implements BoggleDictionary {
     private Trie dictionary = new Trie();
+    ArrayList<String> wordList = new ArrayList<String>();
 
     @Override
     public boolean contains(String word) {
-        // TODO - implement me!
-        return false;
+        TrieNode curr = dictionary.root;
+        for (char c : word.toCharArray()) {
+            if (curr.children[c - 'a'] == null) {
+                return false;
+            }
+            curr = curr.children[c - 'a'];
+        }
+
+        return curr.isWholeWord;
     }
 
     @Override
     public boolean isPrefix(String prefix) {
-        // TODO - implement me!
-        return false;
+        TrieNode curr = dictionary.root;
+        for (char c : prefix.toCharArray()) {
+            if (curr.children[c - 'a'] == null) {
+                return false;
+            }
+            curr = curr.children[c - 'a'];
+        }
+        
+        return true;
     }
 
     @Override
@@ -36,13 +52,14 @@ public class GameDictionary implements BoggleDictionary {
                     curr = curr.children[c - 'a'];
                 }
                 curr.isWholeWord = true;
+                wordList.add(st);
             }
         }  
     }
 
     @Override
     public Iterator<String> iterator() {
-        return;
+        return wordList.iterator();
     }
 }
 
@@ -51,18 +68,6 @@ class Trie {
 
     public Trie() { 
         root = new TrieNode(); 
-    }
-
-    public boolean search(String key)
-    {
-        TrieNode curr = root;
-        for (char c : key.toCharArray()) {
-            if (curr.children[c - 'a'] == null) {
-                return false;
-            }
-            curr = curr.children[c - 'a'];
-        }
-        return curr.isWholeWord;
     }
 
     public boolean isPrefix(String prefix)
