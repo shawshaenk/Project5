@@ -1,6 +1,8 @@
 package assignment;
 
 import java.awt.Point;
+import java.io.BufferedReader;
+import java.io.FileReader;
 import java.io.IOException;
 import java.util.*;
 
@@ -10,11 +12,27 @@ public class GameManager implements BoggleGame {
     String cubeFile;
     BoggleDictionary dictionary;
     private SearchTactic tactic = SEARCH_DEFAULT;
+    private List<Set<String>> playerWords = new ArrayList<>();
+    private List<Point> lastPath;
+    private List<String> cubes = new ArrayList<>();
+    private Random random = new Random();
 
     @Override
     public int addWord(String word, int player) {
-        // TODO - implement me!
-        return 0;
+        if (word == null) return 0;
+        if (playerScores == null || player < 0 || player >= playerScores.length) return 0;
+        word = word.toLowerCase();
+        if (word.length() < 4) return 0;
+        if (playerWords.get(player).contains(word)) return 0;
+        if (!dictionary.contains(word)) return 0;
+        List<Point> path = findPath(word);
+        if (path == null) return 0;
+
+        playerWords.get(player).add(word);
+        int points = word.length() - 3;
+        playerScores[player] += points;
+        lastPath = path;
+        return points;
     }
 
     @Override
@@ -27,7 +45,6 @@ public class GameManager implements BoggleGame {
 
     @Override
     public char[][] getBoard() {
-        // return a copy so callers can't modify our board
         char[][] copy = new char[board.length][];
         for (int r = 0; r < board.length; r++) {
             copy[r] = board[r].clone();
@@ -37,8 +54,8 @@ public class GameManager implements BoggleGame {
 
     @Override
     public List<Point> getLastAddedWord() {
-        // TODO - implement me!
-        return null;
+        if (lastPath == null) return null;
+        return new ArrayList<>(lastPath);
     }
 
     @Override
@@ -48,11 +65,54 @@ public class GameManager implements BoggleGame {
 
     @Override
     public void newGame(int size, int numPlayers, String cubeFile, BoggleDictionary dict) throws IOException {
-        this.board = new char[size][size];
+        if (size < 1) throw new IllegalArgumentException("Size must be at least 1");
+        if (numPlayers < 1) throw new IllegalArgumentException("Must have at least one player");
+        if (dict == null) throw new IllegalArgumentException("Dictionary cannot be null");
+
         this.playerScores = new int[numPlayers];
         this.cubeFile = cubeFile;
         this.dictionary = dict;
-        // TODO - read cubes from cubeFile, shuffle, and fill the board
+        this.playerWords = new ArrayList<>();
+        for (int i = 0; i < numPlayers; i++) {
+            playerWords.add(new HashSet<>());
+        }
+        this.lastPath = null;
+
+        loadCubes(cubeFile);
+        this.board = new char[size][size];
+        fillBoard(size);
+    }
+
+    private void loadCubes(String filename) throws IOException {
+        cubes = new ArrayList<>();
+        try (BufferedReader reader = new BufferedReader(new FileReader(filename))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                line = line.trim().toUpperCase();
+                if (!line.isEmpty()) {
+                    cubes.add(line);
+                }
+            }
+        }
+        if (cubes.isEmpty()) {
+            throw new IOException("Cube file contains no cubes");
+        }
+    }
+
+    private void fillBoard(int size) {
+        List<String> pool = new ArrayList<>();
+        while (pool.size() < size * size) {
+            List<String> shuffled = new ArrayList<>(cubes);
+            Collections.shuffle(shuffled, random);
+            pool.addAll(shuffled);
+        }
+        int i = 0;
+        for (int r = 0; r < size; r++) {
+            for (int c = 0; c < size; c++) {
+                String cube = pool.get(i++);
+                board[r][c] = cube.charAt(random.nextInt(cube.length()));
+            }
+        }
     }
 
     @Override
@@ -68,7 +128,10 @@ public class GameManager implements BoggleGame {
         if (playerScores != null) {
             Arrays.fill(playerScores, 0);
         }
-        // TODO - also clear each player's list of found words once you add those
+        for (Set<String> words : playerWords) {
+            words.clear();
+        }
+        lastPath = null;
     }
 
     @Override
