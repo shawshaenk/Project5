@@ -2,10 +2,15 @@ package assignment;
 
 import java.awt.Point;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
 public class GameManager implements BoggleGame {
+    String[][] board;
+    int[] playerScores;
+    String cubeFile;
+    GameDictionary dictionary;
 
     @Override
     public int addWord(String word, int player) {
@@ -39,8 +44,16 @@ public class GameManager implements BoggleGame {
 
     @Override
     public void newGame(int size, int numPlayers, String cubeFile, BoggleDictionary dict) throws IOException {
-        // TODO - implement me!
+        this.board = new String[size][size];
+        this.playerScores = new int[numPlayers];
+        this.cubeFile = cubeFile;
+        if (dict instanceof GameDictionary) {
+            this.dictionary = (GameDictionary)dict;
+        } else {
+            System.err.println("Must be GameDictionary");
+        }
 
+        
     }
 
     @Override
