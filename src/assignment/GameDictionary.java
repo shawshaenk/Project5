@@ -10,7 +10,7 @@ import java.util.Iterator;
 import java.util.NoSuchElementException;
 
 public class GameDictionary implements BoggleDictionary {
-    private Trie dictionary = new Trie();
+    Trie dictionary = new Trie();
     ArrayList<String> wordList = new ArrayList<String>();
 
     @Override
