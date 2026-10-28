@@ -51,7 +51,7 @@ public class GameDictionary implements BoggleDictionary {
                     }
                     curr = curr.children[c - 'a'];
                 }
-                wordList.add(st)
+                wordList.add(st);
                 curr.isWholeWord = true;
                 wordList.add(st);
             }
