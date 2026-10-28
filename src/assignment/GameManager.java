@@ -20,14 +20,21 @@ public class GameManager implements BoggleGame {
 
     @Override
     public Collection<String> getAllWords() {
-        
         return null;
     }
 
     @Override
     public char[][] getBoard() {
-        // TODO - implement me!
-        return null;
+        char[][] result = new char[board.length][];
+        
+        for (int row = 0; row < board.length; row++) {
+            result[row] = new char[board[row].length];
+            for (int col = 0; col < board[row].length; col++) {
+                result[row][col] = board[row][col].charAt(0);
+            }
+        }
+
+        return result;
     }
 
     @Override
