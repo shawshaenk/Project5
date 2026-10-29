@@ -21,7 +21,7 @@ public class GameManager implements BoggleGame {
     public int addWord(String word, int player) {
         if (word == null) return 0;
         if (playerScores == null || player < 0 || player >= playerScores.length) return 0;
-        word = word.toLowerCase();
+        word = word.trim().toLowerCase();
         if (word.length() < 4) return 0;
         if (playerWords.get(player).contains(word)) return 0;
         if (!dictionary.contains(word)) return 0;
@@ -79,6 +79,9 @@ public class GameManager implements BoggleGame {
         this.lastPath = null;
 
         loadCubes(cubeFile);
+        if (cubes.size() < size * size) {
+            throw new IllegalArgumentException("Not enough cubes for a " + size + "x" + size + " board");
+        }
         this.board = new char[size][size];
         fillBoard(size);
     }
@@ -100,12 +103,8 @@ public class GameManager implements BoggleGame {
     }
 
     private void fillBoard(int size) {
-        List<String> pool = new ArrayList<>();
-        while (pool.size() < size * size) {
-            List<String> shuffled = new ArrayList<>(cubes);
-            Collections.shuffle(shuffled, random);
-            pool.addAll(shuffled);
-        }
+        List<String> pool = new ArrayList<>(cubes);
+        Collections.shuffle(pool, random);
         int i = 0;
         for (int r = 0; r < size; r++) {
             for (int c = 0; c < size; c++) {
@@ -117,10 +116,13 @@ public class GameManager implements BoggleGame {
 
     @Override
     public void setGame(char[][] board) {
+        if (board == null || board.length == 0) {
+            throw new IllegalArgumentException("Board must be non-empty");
+        }
         int n = board.length;
         this.board = new char[n][n];
         for (int r = 0; r < n; r++) {
-            if (board[r].length != n) {
+            if (board[r] == null || board[r].length != n) {
                 throw new IllegalArgumentException("Board must be square");
             }
             this.board[r] = board[r].clone();

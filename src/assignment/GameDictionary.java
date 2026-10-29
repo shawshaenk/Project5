@@ -10,32 +10,43 @@ import java.util.Iterator;
 import java.util.NoSuchElementException;
 
 public class GameDictionary implements BoggleDictionary {
-    Trie dictionary = new Trie();
+    private Trie dictionary = new Trie();
     ArrayList<String> wordList = new ArrayList<String>();
 
     @Override
     public boolean contains(String word) {
-        TrieNode curr = dictionary.root;
-        for (char c : word.toLowerCase().toCharArray()) {
-            if (curr.children[c - 'a'] == null) {
-                return false;
-            }
-            curr = curr.children[c - 'a'];
-        }
-
-        return curr.isWholeWord;
+        TrieNode node = findNode(word);
+        return node != null && node.isWholeWord;
     }
 
     @Override
     public boolean isPrefix(String prefix) {
+        return findNode(prefix) != null;
+    }
+
+    private TrieNode findNode(String s) {
+        if (s == null) {
+            return null;
+        }
         TrieNode curr = dictionary.root;
-        for (char c : prefix.toLowerCase().toCharArray()) {
+        for (char c : s.toLowerCase().toCharArray()) {
+            if (c < 'a' || c > 'z') {
+                return null;
+            }
             if (curr.children[c - 'a'] == null) {
-                return false;
+                return null;
             }
             curr = curr.children[c - 'a'];
         }
-        
+        return curr;
+    }
+
+    private static boolean isAllLetters(String s) {
+        for (char c : s.toCharArray()) {
+            if (c < 'a' || c > 'z') {
+                return false;
+            }
+        }
         return true;
     }
 
@@ -46,7 +57,7 @@ public class GameDictionary implements BoggleDictionary {
             String st;
             while ((st = bfro.readLine()) != null) {
                 st = st.trim().toLowerCase();
-                if (st.isEmpty()) {
+                if (st.isEmpty() || !isAllLetters(st)) {
                     continue;
                 }
                 TrieNode curr = dictionary.root;
@@ -56,10 +67,12 @@ public class GameDictionary implements BoggleDictionary {
                     }
                     curr = curr.children[c - 'a'];
                 }
-                wordList.add(st);
+                if (!curr.isWholeWord) {
+                    wordList.add(st);
+                }
                 curr.isWholeWord = true;
             }
-        }  
+        }
     }
 
     @Override
@@ -114,8 +127,8 @@ public class GameDictionary implements BoggleDictionary {
 class Trie {
     TrieNode root;
 
-    public Trie() { 
-        root = new TrieNode(); 
+    public Trie() {
+        root = new TrieNode();
     }
 
     public boolean isPrefix(String prefix)
