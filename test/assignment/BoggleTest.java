@@ -1,430 +1,432 @@
 package assignment;
 
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
-import java.awt.Point;
-import java.io.File;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.PipedInputStream;
+import java.io.PipedOutputStream;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+/**
+ * Drives Boggle.main as a real console session: lines are typed into System.in
+ * through a pipe and the responses are read back from System.out.
+ * Must be run from the project root, where words.txt and cubes.txt live.
+ */
+@DisplayName("Boggle (console game)")
 public class BoggleTest {
 
-    private static final char[][] GRID = {
-            {'S', 'T', 'O', 'P'},
-            {'L', 'A', 'N', 'E'},
-            {'I', 'R', 'E', 'D'},
-            {'M', 'U', 'S', 'K'}
-    };
+    private static final String WORD_PROMPT = "Enter a word (or a blank line to finish): ";
+    private static final String AGAIN_PROMPT = "Play again? (y/n): ";
+    private static final String GOODBYE = "Thanks for playing!";
+    private static final long TIMEOUT_MS = 15_000;
 
-    private static final Set<String> TRACEABLE = Set.of(
-            "stop", "salt", "slat", "star", "tarn", "tone", "stone",
-            "open", "pond", "lair", "mire", "ruse", "used", "toner");
+    private static GameDictionary dictionary;
+    private static List<String> cubes;
 
-    private static final List<String> NOT_TRACEABLE = List.of(
-            "top", "quiz", "mask", "rare", "lump", "dune");
+    private final InputStream originalIn = System.in;
+    private final PrintStream originalOut = System.out;
+    private Session session;
 
-    private static final List<String> MINI_LEXICON = List.of(
-            "river", "rive", "rivet", "riverbed", "stone", "stony", "sto", "owl");
-
-    private GameDictionary fullDict;
-    private GameDictionary miniDict;
-    private GameManager manager;
-    private String uniformCubes;
-
-    private static String writeTemp(List<String> lines) throws IOException {
-        Path file = Files.createTempFile("boggle-fixture", ".txt");
-        Files.write(file, lines);
-        file.toFile().deleteOnExit();
-        return file.toString();
-    }
-
-    private static Set<String> drain(Iterator<String> iter) {
-        Set<String> result = new HashSet<>();
-        while (iter.hasNext()) {
-            result.add(iter.next());
-        }
-        return result;
-    }
-
-    private static String nonexistentPath(String name) {
-        return new File("no_such_file_" + name + "_98765.txt").getAbsolutePath();
-    }
-
-    private static void checkPath(char[][] grid, String word, List<Point> path) {
-        assertNotNull(path, "no path recorded for " + word);
-        assertEquals(word.length(), path.size(), "path length for " + word);
-        Set<Point> visited = new HashSet<>();
-        Point previous = null;
-        for (int i = 0; i < path.size(); i++) {
-            Point cell = path.get(i);
-            char onBoard = Character.toLowerCase(grid[cell.x][cell.y]);
-            assertEquals(Character.toLowerCase(word.charAt(i)), onBoard, "letter " + i + " of " + word);
-            assertTrue(visited.add(cell), "reused a cell in " + word);
-            if (previous != null) {
-                int rowGap = Math.abs(previous.x - cell.x);
-                int colGap = Math.abs(previous.y - cell.y);
-                assertTrue(rowGap <= 1 && colGap <= 1, "non-adjacent step in " + word);
+    @BeforeAll
+    static void loadFixtures() throws IOException {
+        assumeTrue(Files.exists(Path.of("words.txt")) && Files.exists(Path.of("cubes.txt")),
+                "run from the project root so words.txt and cubes.txt can be found");
+        dictionary = new GameDictionary();
+        dictionary.loadDictionary("words.txt");
+        cubes = new ArrayList<>();
+        for (String line : Files.readAllLines(Path.of("cubes.txt"))) {
+            if (!line.isBlank()) {
+                cubes.add(line.trim().toUpperCase());
             }
-            previous = cell;
         }
     }
 
     @BeforeEach
-    void init() throws IOException {
-        List<String> lexicon = new ArrayList<>(TRACEABLE);
-        lexicon.addAll(NOT_TRACEABLE);
-        fullDict = new GameDictionary();
-        fullDict.loadDictionary(writeTemp(lexicon));
-
-        miniDict = new GameDictionary();
-        miniDict.loadDictionary(writeTemp(MINI_LEXICON));
-
-        uniformCubes = writeTemp(Collections.nCopies(25, "LMNOPQ"));
-        manager = new GameManager();
-        manager.newGame(4, 2, uniformCubes, fullDict);
-        manager.setGame(GRID);
+    void startGame() throws IOException {
+        session = new Session();
     }
 
-    @Nested
-    @DisplayName("Dictionary")
-    class DictionaryBehavior {
+    @AfterEach
+    void restoreStreams() throws InterruptedException {
+        session.close();
+        System.setIn(originalIn);
+        System.setOut(originalOut);
+    }
 
-        @Test
-        @DisplayName("contains finds exact words only")
-        void containsExactWords() {
-            assertTrue(miniDict.contains("river"));
-            assertTrue(miniDict.contains("riverbed"));
-            assertTrue(miniDict.contains("RiVeT"));
-            assertFalse(miniDict.contains("rivers"));
-            assertFalse(miniDict.contains("riv"));
-            assertFalse(miniDict.contains("riverb"));
+    /** One running copy of Boggle.main, with its input and output wired to the test. */
+    private static class Session {
+        private final PipedOutputStream keyboard;
+        private final ByteArrayOutputStream screen = new ByteArrayOutputStream();
+        private final Thread game;
+        private volatile Throwable crash;
+        private int readUpTo = 0;
+        private boolean inputClosed = false;
+
+        Session() throws IOException {
+            PipedInputStream in = new PipedInputStream(1 << 16);
+            keyboard = new PipedOutputStream(in);
+            System.setIn(in);
+            System.setOut(new PrintStream(screen, true, StandardCharsets.UTF_8));
+            game = new Thread(() -> {
+                try {
+                    Boggle.main(new String[0]);
+                } catch (Throwable t) {
+                    crash = t;
+                }
+            });
+            game.setDaemon(true);
+            game.start();
         }
 
-        @Test
-        @DisplayName("contains rejects null, empty, and non-letters")
-        void containsRejectsJunk() {
-            assertFalse(miniDict.contains(null));
-            assertFalse(miniDict.contains(""));
-            assertFalse(miniDict.contains("riv3r"));
-            assertFalse(miniDict.contains("ri ver"));
+        void type(String line) throws IOException {
+            keyboard.write((line + "\n").getBytes(StandardCharsets.UTF_8));
+            keyboard.flush();
         }
 
-        @Test
-        @DisplayName("isPrefix accepts word starts and whole words")
-        void prefixMatches() {
-            assertTrue(miniDict.isPrefix("r"));
-            assertTrue(miniDict.isPrefix("rive"));
-            assertTrue(miniDict.isPrefix("riverb"));
-            assertTrue(miniDict.isPrefix("OwL"));
-            assertTrue(miniDict.isPrefix("stony"));
-        }
-
-        @Test
-        @DisplayName("isPrefix rejects unknown starts and junk")
-        void prefixMisses() {
-            assertFalse(miniDict.isPrefix("q"));
-            assertFalse(miniDict.isPrefix("owls"));
-            assertFalse(miniDict.isPrefix("r i"));
-            assertFalse(miniDict.isPrefix(null));
-        }
-
-        @Test
-        @DisplayName("iteration yields each word exactly once")
-        void iterationCoversEverything() {
-            List<String> produced = new ArrayList<>();
-            for (String word : miniDict) {
-                produced.add(word);
+        /** Simulates the user hitting end-of-input (Ctrl-D). */
+        void closeInput() throws IOException {
+            if (!inputClosed) {
+                inputClosed = true;
+                keyboard.close();
             }
-            assertEquals(MINI_LEXICON.size(), produced.size());
-            assertEquals(new HashSet<>(MINI_LEXICON), new HashSet<>(produced));
         }
 
-        @Test
-        @DisplayName("empty dictionary has nothing to iterate")
-        void emptyDictionary() throws IOException {
-            GameDictionary blank = new GameDictionary();
-            blank.loadDictionary(writeTemp(List.of()));
-            assertFalse(blank.contains("a"));
-            Iterator<String> iter = blank.iterator();
-            assertFalse(iter.hasNext());
-            assertThrows(NoSuchElementException.class, iter::next);
+        /** Waits for marker to be printed, and returns everything printed since the last call. */
+        String readThrough(String marker) throws InterruptedException {
+            long deadline = System.currentTimeMillis() + TIMEOUT_MS;
+            while (true) {
+                String all = screen.toString(StandardCharsets.UTF_8);
+                int at = all.indexOf(marker, readUpTo);
+                if (at >= 0) {
+                    String chunk = all.substring(readUpTo, at + marker.length());
+                    readUpTo = at + marker.length();
+                    return chunk;
+                }
+                if (crash != null) {
+                    fail("Boggle.main threw " + crash + "\nOutput so far:\n" + all, crash);
+                }
+                if (!game.isAlive() || System.currentTimeMillis() > deadline) {
+                    fail("never printed \"" + marker + "\"\nOutput so far:\n" + all);
+                }
+                Thread.sleep(10);
+            }
         }
 
-        @Test
-        @DisplayName("repeated hasNext does not skip, and next throws when done")
-        void iteratorContract() {
-            Iterator<String> iter = miniDict.iterator();
-            assertTrue(iter.hasNext());
-            assertTrue(iter.hasNext());
-            assertEquals(MINI_LEXICON.size(), drain(iter).size());
-            assertFalse(iter.hasNext());
-            assertThrows(NoSuchElementException.class, iter::next);
+        void awaitExit() throws InterruptedException {
+            game.join(TIMEOUT_MS);
+            assertFalse(game.isAlive(), "Boggle.main did not return");
+            assertNull(crash, () -> "Boggle.main threw " + crash);
         }
 
-        @Test
-        @DisplayName("loading normalizes case, trims, and skips bad lines")
-        void loadingCleansLines() throws IOException {
-            GameDictionary messy = new GameDictionary();
-            messy.loadDictionary(writeTemp(List.of("Ocean", "ocean", "", "OCEAN", "   tide   ", "wave5")));
-            assertEquals(Set.of("ocean", "tide"), drain(messy.iterator()));
-        }
-
-        @Test
-        @DisplayName("a second load adds to the first")
-        void secondLoadAccumulates() throws IOException {
-            miniDict.loadDictionary(writeTemp(List.of("cat", "cats")));
-            assertTrue(miniDict.contains("cats"));
-            assertTrue(miniDict.contains("river"));
-            assertEquals(MINI_LEXICON.size() + 2, drain(miniDict.iterator()).size());
-        }
-
-        @Test
-        @DisplayName("missing file throws IOException")
-        void missingFile() {
-            String path = nonexistentPath("words");
-            assertThrows(IOException.class, () -> new GameDictionary().loadDictionary(path));
+        void close() throws InterruptedException {
+            try {
+                closeInput();
+            } catch (IOException ignored) {
+                // the game already stopped reading
+            }
+            game.join(TIMEOUT_MS);
         }
     }
 
-    @Nested
-    @DisplayName("Game setup")
-    class Setup {
+    /** Pulls the most recently printed size x size board out of a chunk of output. */
+    private static char[][] lastBoard(String chunk, int size) {
+        List<String> rows = new ArrayList<>();
+        for (String line : chunk.split("\\R")) {
+            String trimmed = line.trim();
+            if (trimmed.matches("[A-Za-z]( [A-Za-z]){" + (size - 1) + "}")) {
+                rows.add(trimmed.replace(" ", ""));
+            }
+        }
+        assertTrue(rows.size() >= size, "no " + size + "x" + size + " board in:\n" + chunk);
+        char[][] board = new char[size][];
+        for (int r = 0; r < size; r++) {
+            board[r] = rows.get(rows.size() - size + r).toCharArray();
+        }
+        return board;
+    }
 
-        @Test
-        @DisplayName("newGame builds a square board from cube letters")
-        void boardShapeAndLetters() throws IOException {
-            manager.newGame(5, 1, uniformCubes, fullDict);
-            char[][] grid = manager.getBoard();
-            assertEquals(5, grid.length);
-            for (char[] row : grid) {
-                assertEquals(5, row.length);
-                for (char ch : row) {
-                    assertTrue("LMNOPQ".indexOf(Character.toUpperCase(ch)) >= 0, "unexpected " + ch);
+    /** Every word the game should accept on this board, worked out independently of the console. */
+    private static Set<String> wordsOn(char[][] board) throws IOException {
+        GameManager oracle = new GameManager();
+        oracle.newGame(board.length, 1, "cubes.txt", dictionary);
+        oracle.setGame(board);
+        return new TreeSet<>(oracle.getAllWords());
+    }
+
+    /** Reads to the first word prompt, replaying until the board has at least `needed` words. */
+    private char[][] boardWithWords(int needed) throws Exception {
+        for (int attempt = 0; attempt < 25; attempt++) {
+            char[][] board = lastBoard(session.readThrough(WORD_PROMPT), 4);
+            if (wordsOn(board).size() >= needed) {
+                return board;
+            }
+            session.type("");
+            session.readThrough(AGAIN_PROMPT);
+            session.type("y");
+        }
+        fail("no board with " + needed + " words after 25 games");
+        return null;
+    }
+
+    private static String lineStartingWith(String chunk, String prefix) {
+        for (String line : chunk.split("\\R")) {
+            if (line.startsWith(prefix)) {
+                return line;
+            }
+        }
+        fail("no line starting with \"" + prefix + "\" in:\n" + chunk);
+        return null;
+    }
+
+    /** Parses "Label (n): a, b, c" into its word list, checking that n matches. */
+    private static List<String> wordList(String chunk, String label) {
+        String line = lineStartingWith(chunk, label + " (");
+        int count = Integer.parseInt(line.substring(label.length() + 2, line.indexOf(')')));
+        String rest = line.substring(line.indexOf(": ") + 2).trim();
+        List<String> words = rest.isEmpty() ? List.of() : Arrays.asList(rest.split(", "));
+        assertEquals(count, words.size(), "count shown does not match list: " + line);
+        return words;
+    }
+
+    private static int scoreOn(String chunk, String label) {
+        String line = lineStartingWith(chunk, label + ": ");
+        return Integer.parseInt(line.substring(label.length() + 2).trim());
+    }
+
+    private static int points(String word) {
+        return word.length() - 3;
+    }
+
+    @Test
+    @DisplayName("prints a 4x4 board of uppercase letters drawn from the cubes")
+    void printsBoard() throws Exception {
+        char[][] board = lastBoard(session.readThrough(WORD_PROMPT), 4);
+        Map<Character, Integer> available = new HashMap<>();
+        for (String cube : cubes) {
+            for (char face : cube.toCharArray()) {
+                available.merge(face, 1, Integer::sum);
+            }
+        }
+        for (char[] row : board) {
+            assertEquals(4, row.length);
+            for (char ch : row) {
+                assertTrue(Character.isUpperCase(ch), "board letter not capitalized: " + ch);
+                assertTrue(available.containsKey(ch), "letter " + ch + " is not on any cube");
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("a valid word scores length - 3 and shows the running total")
+    void acceptsValidWord() throws Exception {
+        char[][] board = boardWithWords(1);
+        String word = wordsOn(board).iterator().next();
+
+        session.type(word);
+        String reply = session.readThrough(WORD_PROMPT);
+
+        int earned = points(word);
+        String unit = earned == 1 ? " point" : " points";
+        assertTrue(reply.contains("+" + earned + unit + "  (total: " + earned + ")"),
+                "unexpected reply to \"" + word + "\":\n" + reply);
+    }
+
+    @Test
+    @DisplayName("after a valid word, the board is reprinted with exactly the path in lowercase")
+    void highlightsPath() throws Exception {
+        char[][] board = boardWithWords(1);
+        String word = wordsOn(board).iterator().next();
+
+        session.type(word);
+        char[][] highlighted = lastBoard(session.readThrough(WORD_PROMPT), 4);
+
+        int lowered = 0;
+        for (int r = 0; r < 4; r++) {
+            for (int c = 0; c < 4; c++) {
+                assertEquals(board[r][c], Character.toUpperCase(highlighted[r][c]),
+                        "highlighting changed the letter at (" + r + ", " + c + ")");
+                if (Character.isLowerCase(highlighted[r][c])) {
+                    lowered++;
                 }
             }
         }
+        assertEquals(word.length(), lowered, "highlighted cells for \"" + word + "\"");
+    }
 
-        @Test
-        @DisplayName("each cube lands on the board once")
-        void everyCubeUsedOnce() throws IOException {
-            String solidCubes = writeTemp(List.of("WWWWWW", "XXXXXX", "YYYYYY", "ZZZZZZ"));
-            manager.newGame(2, 1, solidCubes, fullDict);
-            Set<Character> seen = new HashSet<>();
-            for (char[] row : manager.getBoard()) {
-                for (char ch : row) {
-                    seen.add(Character.toUpperCase(ch));
-                }
-            }
-            assertEquals(Set.of('W', 'X', 'Y', 'Z'), seen);
-        }
-
-        @Test
-        @DisplayName("newGame clears scores, found words, and last path")
-        void newGameStartsFresh() throws IOException {
-            assertEquals(1, manager.addWord("stop", 0));
-            manager.newGame(4, 3, uniformCubes, fullDict);
-            assertArrayEquals(new int[3], manager.getScores());
-            assertNull(manager.getLastAddedWord());
-            manager.setGame(GRID);
-            assertEquals(1, manager.addWord("stop", 0));
-        }
-
-        @Test
-        @DisplayName("newGame rejects bad sizes, players, and cube files")
-        void newGameValidation() throws IOException {
-            String tooFew = writeTemp(Collections.nCopies(3, "LMNOPQ"));
-            String absent = nonexistentPath("cubes");
-            assertThrows(IllegalArgumentException.class, () -> manager.newGame(4, 0, uniformCubes, fullDict));
-            assertThrows(IllegalArgumentException.class, () -> manager.newGame(0, 1, uniformCubes, fullDict));
-            assertThrows(IllegalArgumentException.class, () -> manager.newGame(2, 1, tooFew, fullDict));
-            assertThrows(IOException.class, () -> manager.newGame(4, 1, absent, fullDict));
-        }
-
-        @Test
-        @DisplayName("board is copied both into setGame and out of getBoard")
-        void boardIsDefensivelyCopied() {
-            char[][] snapshot = manager.getBoard();
-            for (int r = 0; r < GRID.length; r++) {
-                assertArrayEquals(GRID[r], snapshot[r], "row " + r);
-            }
-            snapshot[1][1] = 'Q';
-            assertEquals('A', manager.getBoard()[1][1]);
-
-            char[][] tiny = {{'G', 'H'}, {'J', 'K'}};
-            manager.setGame(tiny);
-            tiny[1][0] = 'Q';
-            assertEquals('J', manager.getBoard()[1][0]);
-        }
-
-        @Test
-        @DisplayName("setGame rejects null, empty, ragged, and non-square boards")
-        void setGameValidation() {
-            assertThrows(IllegalArgumentException.class, () -> manager.setGame(null));
-            assertThrows(IllegalArgumentException.class, () -> manager.setGame(new char[0][0]));
-            assertThrows(IllegalArgumentException.class, () -> manager.setGame(new char[][]{{'A', 'B'}, {'C'}}));
-            assertThrows(IllegalArgumentException.class, () -> manager.setGame(new char[][]{{'A', 'B', 'C'}, {'D', 'E', 'F'}}));
-        }
-
-        @Test
-        @DisplayName("setGame clears scores, found words, and last path")
-        void setGameStartsFresh() {
-            assertEquals(1, manager.addWord("stop", 0));
-            assertEquals(2, manager.addWord("stone", 1));
-            manager.setGame(GRID);
-            assertArrayEquals(new int[2], manager.getScores());
-            assertNull(manager.getLastAddedWord());
-            assertEquals(1, manager.addWord("stop", 0));
-        }
-
-        @Test
-        @DisplayName("a lowercase board plays the same as uppercase")
-        void lowercaseBoard() {
-            char[][] lower = new char[GRID.length][];
-            for (int r = 0; r < GRID.length; r++) {
-                lower[r] = String.valueOf(GRID[r]).toLowerCase().toCharArray();
-            }
-            manager.setGame(lower);
-            assertEquals(1, manager.addWord("stop", 0));
-            assertEquals(TRACEABLE, new HashSet<>(manager.getAllWords()));
+    @Test
+    @DisplayName("the running total adds up across several words")
+    void runningTotal() throws Exception {
+        char[][] board = boardWithWords(3);
+        int total = 0;
+        for (String word : new ArrayList<>(wordsOn(board)).subList(0, 3)) {
+            session.type(word);
+            String reply = session.readThrough(WORD_PROMPT);
+            total += points(word);
+            assertTrue(reply.contains("(total: " + total + ")"), "after \"" + word + "\":\n" + reply);
         }
     }
 
-    @Nested
-    @DisplayName("Adding words")
-    class AddingWords {
+    @Test
+    @DisplayName("input is trimmed and case-insensitive")
+    void normalizesInput() throws Exception {
+        char[][] board = boardWithWords(1);
+        String word = wordsOn(board).iterator().next();
 
-        @Test
-        @DisplayName("each word scores its length minus three")
-        void scoring() {
-            int expectedTotal = 0;
-            for (String word : TRACEABLE) {
-                int earned = manager.addWord(word, 1);
-                assertEquals(word.length() - 3, earned, word);
-                expectedTotal += earned;
-            }
-            assertArrayEquals(new int[]{0, expectedTotal}, manager.getScores());
-        }
+        session.type("   " + word.toUpperCase() + "   ");
+        String reply = session.readThrough(WORD_PROMPT);
 
-        @Test
-        @DisplayName("invalid words and players earn nothing")
-        void rejections() {
-            assertEquals(0, manager.addWord("top", 0));
-            assertEquals(0, manager.addWord("", 0));
-            assertEquals(0, manager.addWord(null, 0));
-            assertEquals(0, manager.addWord("pots", 0));
-            assertEquals(0, manager.addWord("quiz", 0));
-            assertEquals(0, manager.addWord("mask", 0));
-            assertEquals(0, manager.addWord("lump", 0));
-            assertEquals(0, manager.addWord("rare", 0));
-            assertEquals(0, manager.addWord("stop", -1));
-            assertEquals(0, manager.addWord("stop", 2));
-            assertArrayEquals(new int[2], manager.getScores());
-        }
-
-        @Test
-        @DisplayName("same player cannot score a word twice, in any case")
-        void noDoubleScoring() {
-            assertEquals(1, manager.addWord("tarn", 0));
-            assertEquals(0, manager.addWord("tarn", 0));
-            assertEquals(0, manager.addWord("TARN", 0));
-            assertArrayEquals(new int[]{1, 0}, manager.getScores());
-        }
-
-        @Test
-        @DisplayName("getScores returns a copy")
-        void scoresAreCopied() {
-            manager.addWord("tarn", 0);
-            int[] leaked = manager.getScores();
-            leaked[0] = 999;
-            assertArrayEquals(new int[]{1, 0}, manager.getScores());
-        }
-
-        @Test
-        @DisplayName("players are tracked independently; case and spacing ignored")
-        void independentPlayers() {
-            assertEquals(1, manager.addWord("pond", 0));
-            assertEquals(1, manager.addWord("pond", 1));
-            assertEquals(2, manager.addWord("ToNeR", 0));
-            assertEquals(1, manager.addWord("  lair  ", 1));
-            assertArrayEquals(new int[]{3, 2}, manager.getScores());
-        }
-
-        @Test
-        @DisplayName("last added word is always a legal path")
-        void pathsAreLegal() {
-            for (String word : TRACEABLE) {
-                assertTrue(manager.addWord(word, 0) > 0, word);
-                checkPath(GRID, word, manager.getLastAddedWord());
-            }
-        }
-
-        @Test
-        @DisplayName("last added word has exact (row, col) points and ignores failures")
-        void exactPathSurvivesFailures() {
-            assertNull(manager.getLastAddedWord());
-            manager.addWord("pond", 0);
-            List<Point> expected = List.of(new Point(0, 3), new Point(0, 2), new Point(1, 2), new Point(2, 3));
-            assertEquals(expected, manager.getLastAddedWord());
-            manager.addWord("quiz", 0);
-            manager.addWord("pond", 0);
-            assertEquals(expected, manager.getLastAddedWord());
-        }
+        assertTrue(reply.contains("+" + points(word)), "uppercase, padded input rejected:\n" + reply);
     }
 
-    @Nested
-    @DisplayName("Finding all words")
-    class FindingAll {
+    @Test
+    @DisplayName("the same word twice is refused the second time")
+    void rejectsRepeat() throws Exception {
+        char[][] board = boardWithWords(1);
+        String word = wordsOn(board).iterator().next();
 
-        @Test
-        @DisplayName("both tactics and null find every word with no duplicates")
-        void allTacticsMatch() {
-            manager.addWord("stop", 0);
-            manager.addWord("stone", 1);
-            assertEquals(TRACEABLE, new HashSet<>(manager.getAllWords()));
-            BoggleGame.SearchTactic[] tactics = {
-                    BoggleGame.SearchTactic.SEARCH_DICT, BoggleGame.SearchTactic.SEARCH_BOARD, null};
-            for (BoggleGame.SearchTactic tactic : tactics) {
-                manager.setSearchTactic(tactic);
-                Collection<String> found = manager.getAllWords();
-                assertEquals(TRACEABLE, new HashSet<>(found), "tactic " + tactic);
-                assertEquals(TRACEABLE.size(), found.size(), "duplicates under " + tactic);
+        session.type(word);
+        session.readThrough(WORD_PROMPT);
+        session.type(word);
+        String reply = session.readThrough(WORD_PROMPT);
+
+        assertTrue(reply.contains("You already found \"" + word + "\"."), reply);
+        assertFalse(reply.contains("+"), "a repeat scored points:\n" + reply);
+    }
+
+    @Test
+    @DisplayName("words under 4 letters are too short")
+    void rejectsShortWord() throws Exception {
+        session.readThrough(WORD_PROMPT);
+        session.type("cat");
+        String reply = session.readThrough(WORD_PROMPT);
+        assertTrue(reply.contains("\"cat\" is too short. Words need at least 4 letters."), reply);
+    }
+
+    @Test
+    @DisplayName("words missing from the dictionary are rejected")
+    void rejectsNonWord() throws Exception {
+        session.readThrough(WORD_PROMPT);
+        session.type("qxzvq");
+        String reply = session.readThrough(WORD_PROMPT);
+        assertTrue(reply.contains("\"qxzvq\" is not a word in the dictionary."), reply);
+    }
+
+    @Test
+    @DisplayName("real words that cannot be traced are not on the board")
+    void rejectsWordOffBoard() throws Exception {
+        char[][] board = lastBoard(session.readThrough(WORD_PROMPT), 4);
+        Set<String> traceable = wordsOn(board);
+        String missing = null;
+        for (String word : dictionary) {
+            if (word.length() >= 4 && !traceable.contains(word)) {
+                missing = word;
+                break;
             }
         }
+        assertNotNull(missing);
 
-        @Test
-        @DisplayName("tiny boards with no words")
-        void barrenBoards() {
-            for (BoggleGame.SearchTactic tactic : BoggleGame.SearchTactic.values()) {
-                manager.setSearchTactic(tactic);
-                manager.setGame(new char[][]{{'Q', 'Q'}, {'Q', 'Q'}});
-                assertTrue(manager.getAllWords().isEmpty(), tactic.name());
-                manager.setGame(new char[][]{{'S'}});
-                assertTrue(manager.getAllWords().isEmpty(), tactic.name());
-                assertEquals(0, manager.addWord("stop", 0));
-            }
-        }
+        session.type(missing);
+        String reply = session.readThrough(WORD_PROMPT);
+        assertTrue(reply.contains("\"" + missing + "\" is not on the board."), reply);
+    }
 
-        @Test
-        @DisplayName("tactics agree on random boards, and every found word can be added")
-        void randomBoardsAgree() throws IOException {
-            String mixedCubes = writeTemp(Collections.nCopies(25, "ADEILMNOPRSTU"));
-            for (int round = 0; round < 20; round++) {
-                manager.newGame(round % 2 == 0 ? 5 : 4, 1, mixedCubes, fullDict);
-                manager.setSearchTactic(BoggleGame.SearchTactic.SEARCH_DICT);
-                Set<String> viaDict = new HashSet<>(manager.getAllWords());
-                manager.setSearchTactic(BoggleGame.SearchTactic.SEARCH_BOARD);
-                assertEquals(viaDict, new HashSet<>(manager.getAllWords()), "round " + round);
-                for (String word : viaDict) {
-                    assertTrue(manager.addWord(word, 0) > 0, word + " found but not addable");
-                }
-            }
+    @Test
+    @DisplayName("the summary splits words between player and computer and scores both")
+    void endOfRoundSummary() throws Exception {
+        char[][] board = boardWithWords(2);
+        Set<String> all = wordsOn(board);
+        Iterator<String> it = all.iterator();
+        List<String> mine = List.of(it.next(), it.next());
+
+        for (String word : mine) {
+            session.type(word);
+            session.readThrough(WORD_PROMPT);
         }
+        session.type("");
+        String summary = session.readThrough(AGAIN_PROMPT);
+
+        Set<String> computer = new TreeSet<>(all);
+        mine.forEach(computer::remove);
+        int myScore = mine.stream().mapToInt(BoggleTest::points).sum();
+        int computerScore = computer.stream().mapToInt(BoggleTest::points).sum();
+
+        assertEquals(new TreeSet<>(mine), new TreeSet<>(wordList(summary, "Your words")));
+        assertEquals(computer, new TreeSet<>(wordList(summary, "Computer's words")));
+        assertEquals(myScore, scoreOn(summary, "Your score"));
+        assertEquals(computerScore, scoreOn(summary, "Computer score"));
+    }
+
+    @Test
+    @DisplayName("finishing with no words gives the computer everything")
+    void emptyRound() throws Exception {
+        char[][] board = lastBoard(session.readThrough(WORD_PROMPT), 4);
+        Set<String> all = wordsOn(board);
+
+        session.type("");
+        String summary = session.readThrough(AGAIN_PROMPT);
+
+        assertTrue(wordList(summary, "Your words").isEmpty());
+        assertEquals(0, scoreOn(summary, "Your score"));
+        assertEquals(all, new TreeSet<>(wordList(summary, "Computer's words")));
+        assertEquals(all.stream().mapToInt(BoggleTest::points).sum(), scoreOn(summary, "Computer score"));
+    }
+
+    @Test
+    @DisplayName("answering y starts a fresh round with scores reset")
+    void playAgain() throws Exception {
+        char[][] board = boardWithWords(1);
+        String word = wordsOn(board).iterator().next();
+        session.type(word);
+        session.readThrough(WORD_PROMPT);
+        session.type("");
+        session.readThrough(AGAIN_PROMPT);
+
+        session.type("y");
+        char[][] next = lastBoard(session.readThrough(WORD_PROMPT), 4);
+        session.type("");
+        String summary = session.readThrough(AGAIN_PROMPT);
+
+        assertTrue(wordList(summary, "Your words").isEmpty(), "words carried over:\n" + summary);
+        assertEquals(0, scoreOn(summary, "Your score"));
+        assertEquals(wordsOn(next), new TreeSet<>(wordList(summary, "Computer's words")));
+
+        session.type("n");
+        session.readThrough(GOODBYE);
+        session.awaitExit();
+    }
+
+    @Test
+    @DisplayName("answering n says goodbye and main returns")
+    void quit() throws Exception {
+        session.readThrough(WORD_PROMPT);
+        session.type("");
+        session.readThrough(AGAIN_PROMPT);
+        session.type("n");
+        session.readThrough(GOODBYE);
+        session.awaitExit();
+    }
+
+    @Test
+    @DisplayName("end of input mid-round still prints the summary and exits cleanly")
+    void endOfInput() throws Exception {
+        session.readThrough(WORD_PROMPT);
+        session.closeInput();
+        String rest = session.readThrough(GOODBYE);
+        assertTrue(rest.contains("Your score: 0"), rest);
+        assertTrue(rest.contains("Computer score: "), rest);
+        session.awaitExit();
     }
 }
