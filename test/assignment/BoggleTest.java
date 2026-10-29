@@ -1,251 +1,430 @@
 package assignment;
 
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
+
 import java.awt.Point;
-import java.io.BufferedReader;
-import java.io.FileReader;
+import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.*;
 
-public class GameManager implements BoggleGame {
-    char[][] board;
-    int[] playerScores;
-    String cubeFile;
-    BoggleDictionary dictionary;
-    private SearchTactic tactic = SEARCH_DEFAULT;
-    private List<Set<String>> playerWords = new ArrayList<>();
-    private List<Point> lastPath;
-    private List<String> cubes = new ArrayList<>();
-    private Random random = new Random();
+import static org.junit.jupiter.api.Assertions.*;
 
-    @Override
-    public int addWord(String word, int player) {
-        if (word == null) return 0;
-        if (playerScores == null || player < 0 || player >= playerScores.length) return 0;
-        word = word.trim().toLowerCase();
-        if (word.length() < 4) return 0;
-        if (playerWords.get(player).contains(word)) return 0;
-        if (!dictionary.contains(word)) return 0;
-        List<Point> path = findPath(word);
-        if (path == null) return 0;
+public class BoggleTest {
 
-        playerWords.get(player).add(word);
-        int points = word.length() - 3;
-        playerScores[player] += points;
-        lastPath = path;
-        return points;
+    private static final char[][] GRID = {
+            {'S', 'T', 'O', 'P'},
+            {'L', 'A', 'N', 'E'},
+            {'I', 'R', 'E', 'D'},
+            {'M', 'U', 'S', 'K'}
+    };
+
+    private static final Set<String> TRACEABLE = Set.of(
+            "stop", "salt", "slat", "star", "tarn", "tone", "stone",
+            "open", "pond", "lair", "mire", "ruse", "used", "toner");
+
+    private static final List<String> NOT_TRACEABLE = List.of(
+            "top", "quiz", "mask", "rare", "lump", "dune");
+
+    private static final List<String> MINI_LEXICON = List.of(
+            "river", "rive", "rivet", "riverbed", "stone", "stony", "sto", "owl");
+
+    private GameDictionary fullDict;
+    private GameDictionary miniDict;
+    private GameManager manager;
+    private String uniformCubes;
+
+    private static String writeTemp(List<String> lines) throws IOException {
+        Path file = Files.createTempFile("boggle-fixture", ".txt");
+        Files.write(file, lines);
+        file.toFile().deleteOnExit();
+        return file.toString();
     }
 
-    @Override
-    public Collection<String> getAllWords() {
-        if (tactic == SearchTactic.SEARCH_DICT) {
-            return searchDictionary();
+    private static Set<String> drain(Iterator<String> iter) {
+        Set<String> result = new HashSet<>();
+        while (iter.hasNext()) {
+            result.add(iter.next());
         }
-        return searchBoard();
+        return result;
     }
 
-    @Override
-    public char[][] getBoard() {
-        char[][] copy = new char[board.length][];
-        for (int r = 0; r < board.length; r++) {
-            copy[r] = board[r].clone();
-        }
-        return copy;
+    private static String nonexistentPath(String name) {
+        return new File("no_such_file_" + name + "_98765.txt").getAbsolutePath();
     }
 
-    @Override
-    public List<Point> getLastAddedWord() {
-        if (lastPath == null) return null;
-        return new ArrayList<>(lastPath);
-    }
-
-    @Override
-    public int[] getScores() {
-        return playerScores.clone();
-    }
-
-    @Override
-    public void newGame(int size, int numPlayers, String cubeFile, BoggleDictionary dict) throws IOException {
-        if (size < 1) throw new IllegalArgumentException("Size must be at least 1");
-        if (numPlayers < 1) throw new IllegalArgumentException("Must have at least one player");
-        if (dict == null) throw new IllegalArgumentException("Dictionary cannot be null");
-
-        this.playerScores = new int[numPlayers];
-        this.cubeFile = cubeFile;
-        this.dictionary = dict;
-        this.playerWords = new ArrayList<>();
-        for (int i = 0; i < numPlayers; i++) {
-            playerWords.add(new HashSet<>());
-        }
-        this.lastPath = null;
-
-        loadCubes(cubeFile);
-        if (cubes.size() < size * size) {
-            throw new IllegalArgumentException("Not enough cubes for a " + size + "x" + size + " board");
-        }
-        this.board = new char[size][size];
-        fillBoard(size);
-    }
-
-    private void loadCubes(String filename) throws IOException {
-        cubes = new ArrayList<>();
-        try (BufferedReader reader = new BufferedReader(new FileReader(filename))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                line = line.trim().toUpperCase();
-                if (!line.isEmpty()) {
-                    cubes.add(line);
-                }
+    private static void checkPath(char[][] grid, String word, List<Point> path) {
+        assertNotNull(path, "no path recorded for " + word);
+        assertEquals(word.length(), path.size(), "path length for " + word);
+        Set<Point> visited = new HashSet<>();
+        Point previous = null;
+        for (int i = 0; i < path.size(); i++) {
+            Point cell = path.get(i);
+            char onBoard = Character.toLowerCase(grid[cell.x][cell.y]);
+            assertEquals(Character.toLowerCase(word.charAt(i)), onBoard, "letter " + i + " of " + word);
+            assertTrue(visited.add(cell), "reused a cell in " + word);
+            if (previous != null) {
+                int rowGap = Math.abs(previous.x - cell.x);
+                int colGap = Math.abs(previous.y - cell.y);
+                assertTrue(rowGap <= 1 && colGap <= 1, "non-adjacent step in " + word);
             }
-        }
-        if (cubes.isEmpty()) {
-            throw new IOException("Cube file contains no cubes");
+            previous = cell;
         }
     }
 
-    private void fillBoard(int size) {
-        List<String> pool = new ArrayList<>(cubes);
-        Collections.shuffle(pool, random);
-        int i = 0;
-        for (int r = 0; r < size; r++) {
-            for (int c = 0; c < size; c++) {
-                String cube = pool.get(i++);
-                board[r][c] = cube.charAt(random.nextInt(cube.length()));
+    @BeforeEach
+    void init() throws IOException {
+        List<String> lexicon = new ArrayList<>(TRACEABLE);
+        lexicon.addAll(NOT_TRACEABLE);
+        fullDict = new GameDictionary();
+        fullDict.loadDictionary(writeTemp(lexicon));
+
+        miniDict = new GameDictionary();
+        miniDict.loadDictionary(writeTemp(MINI_LEXICON));
+
+        uniformCubes = writeTemp(Collections.nCopies(25, "LMNOPQ"));
+        manager = new GameManager();
+        manager.newGame(4, 2, uniformCubes, fullDict);
+        manager.setGame(GRID);
+    }
+
+    @Nested
+    @DisplayName("Dictionary")
+    class DictionaryBehavior {
+
+        @Test
+        @DisplayName("contains finds exact words only")
+        void containsExactWords() {
+            assertTrue(miniDict.contains("river"));
+            assertTrue(miniDict.contains("riverbed"));
+            assertTrue(miniDict.contains("RiVeT"));
+            assertFalse(miniDict.contains("rivers"));
+            assertFalse(miniDict.contains("riv"));
+            assertFalse(miniDict.contains("riverb"));
+        }
+
+        @Test
+        @DisplayName("contains rejects null, empty, and non-letters")
+        void containsRejectsJunk() {
+            assertFalse(miniDict.contains(null));
+            assertFalse(miniDict.contains(""));
+            assertFalse(miniDict.contains("riv3r"));
+            assertFalse(miniDict.contains("ri ver"));
+        }
+
+        @Test
+        @DisplayName("isPrefix accepts word starts and whole words")
+        void prefixMatches() {
+            assertTrue(miniDict.isPrefix("r"));
+            assertTrue(miniDict.isPrefix("rive"));
+            assertTrue(miniDict.isPrefix("riverb"));
+            assertTrue(miniDict.isPrefix("OwL"));
+            assertTrue(miniDict.isPrefix("stony"));
+        }
+
+        @Test
+        @DisplayName("isPrefix rejects unknown starts and junk")
+        void prefixMisses() {
+            assertFalse(miniDict.isPrefix("q"));
+            assertFalse(miniDict.isPrefix("owls"));
+            assertFalse(miniDict.isPrefix("r i"));
+            assertFalse(miniDict.isPrefix(null));
+        }
+
+        @Test
+        @DisplayName("iteration yields each word exactly once")
+        void iterationCoversEverything() {
+            List<String> produced = new ArrayList<>();
+            for (String word : miniDict) {
+                produced.add(word);
             }
+            assertEquals(MINI_LEXICON.size(), produced.size());
+            assertEquals(new HashSet<>(MINI_LEXICON), new HashSet<>(produced));
+        }
+
+        @Test
+        @DisplayName("empty dictionary has nothing to iterate")
+        void emptyDictionary() throws IOException {
+            GameDictionary blank = new GameDictionary();
+            blank.loadDictionary(writeTemp(List.of()));
+            assertFalse(blank.contains("a"));
+            Iterator<String> iter = blank.iterator();
+            assertFalse(iter.hasNext());
+            assertThrows(NoSuchElementException.class, iter::next);
+        }
+
+        @Test
+        @DisplayName("repeated hasNext does not skip, and next throws when done")
+        void iteratorContract() {
+            Iterator<String> iter = miniDict.iterator();
+            assertTrue(iter.hasNext());
+            assertTrue(iter.hasNext());
+            assertEquals(MINI_LEXICON.size(), drain(iter).size());
+            assertFalse(iter.hasNext());
+            assertThrows(NoSuchElementException.class, iter::next);
+        }
+
+        @Test
+        @DisplayName("loading normalizes case, trims, and skips bad lines")
+        void loadingCleansLines() throws IOException {
+            GameDictionary messy = new GameDictionary();
+            messy.loadDictionary(writeTemp(List.of("Ocean", "ocean", "", "OCEAN", "   tide   ", "wave5")));
+            assertEquals(Set.of("ocean", "tide"), drain(messy.iterator()));
+        }
+
+        @Test
+        @DisplayName("a second load adds to the first")
+        void secondLoadAccumulates() throws IOException {
+            miniDict.loadDictionary(writeTemp(List.of("cat", "cats")));
+            assertTrue(miniDict.contains("cats"));
+            assertTrue(miniDict.contains("river"));
+            assertEquals(MINI_LEXICON.size() + 2, drain(miniDict.iterator()).size());
+        }
+
+        @Test
+        @DisplayName("missing file throws IOException")
+        void missingFile() {
+            String path = nonexistentPath("words");
+            assertThrows(IOException.class, () -> new GameDictionary().loadDictionary(path));
         }
     }
 
-    @Override
-    public void setGame(char[][] board) {
-        if (board == null || board.length == 0) {
-            throw new IllegalArgumentException("Board must be non-empty");
-        }
-        int n = board.length;
-        this.board = new char[n][n];
-        for (int r = 0; r < n; r++) {
-            if (board[r] == null || board[r].length != n) {
-                throw new IllegalArgumentException("Board must be square");
-            }
-            this.board[r] = board[r].clone();
-        }
-        if (playerScores != null) {
-            Arrays.fill(playerScores, 0);
-        }
-        for (Set<String> words : playerWords) {
-            words.clear();
-        }
-        lastPath = null;
-    }
+    @Nested
+    @DisplayName("Game setup")
+    class Setup {
 
-    @Override
-    public void setSearchTactic(SearchTactic tactic) {
-        if (tactic == null) {
-            this.tactic = SEARCH_DEFAULT;
-        } else {
-            this.tactic = tactic;
-        }
-    }
-
-    private Set<String> searchBoard() {
-        Set<String> found = new TreeSet<>();
-        int n = board.length;
-        boolean[][] visited = new boolean[n][n];
-        StringBuilder current = new StringBuilder();
-
-        for (int r = 0; r < n; r++) {
-            for (int c = 0; c < n; c++) {
-                dfs(r, c, visited, current, found);
-            }
-        }
-        return found;
-    }
-
-    private void dfs(int r, int c, boolean[][] visited, StringBuilder current, Set<String> found) {
-        int n = board.length;
-
-        if (r < 0 || r >= n || c < 0 || c >= n) {
-            return;
-        }
-        if (visited[r][c]) {
-            return;
-        }
-
-        current.append(Character.toLowerCase(board[r][c]));
-        String word = current.toString();
-
-        if (!dictionary.isPrefix(word)) {
-            current.deleteCharAt(current.length() - 1);
-            return;
-        }
-
-        if (word.length() >= 4 && dictionary.contains(word)) {
-            found.add(word);
-        }
-
-        visited[r][c] = true;
-        for (int dr = -1; dr <= 1; dr++) {
-            for (int dc = -1; dc <= 1; dc++) {
-                if (dr != 0 || dc != 0) {
-                    dfs(r + dr, c + dc, visited, current, found);
-                }
-            }
-        }
-
-        visited[r][c] = false;
-        current.deleteCharAt(current.length() - 1);
-    }
-
-    private Set<String> searchDictionary() {
-        Set<String> found = new TreeSet<>();
-        for (String word : dictionary) {
-            if (word.length() >= 4 && findPath(word) != null) {
-                found.add(word);
-            }
-        }
-        return found;
-    }
-
-    private List<Point> findPath(String word) {
-        if (word == null || word.isEmpty()) return null;
-        word = word.toLowerCase();
-
-        int n = board.length;
-        boolean[][] visited = new boolean[n][n];
-        List<Point> path = new ArrayList<>();
-
-        for (int r = 0; r < n; r++) {
-            for (int c = 0; c < n; c++) {
-                if (pathFrom(r, c, word, 0, visited, path)) {
-                    return path;
-                }
-            }
-        }
-        return null;
-    }
-
-    private boolean pathFrom(int r, int c, String word, int index,
-                             boolean[][] visited, List<Point> path) {
-        int n = board.length;
-
-        if (r < 0 || r >= n || c < 0 || c >= n) return false;
-        if (visited[r][c]) return false;
-        if (Character.toLowerCase(board[r][c]) != word.charAt(index)) return false;
-
-        visited[r][c] = true;
-        path.add(new Point(r, c));
-
-        if (index == word.length() - 1) return true;
-
-        for (int dr = -1; dr <= 1; dr++) {
-            for (int dc = -1; dc <= 1; dc++) {
-                if ((dr != 0 || dc != 0)
-                        && pathFrom(r + dr, c + dc, word, index + 1, visited, path)) {
-                    return true;
+        @Test
+        @DisplayName("newGame builds a square board from cube letters")
+        void boardShapeAndLetters() throws IOException {
+            manager.newGame(5, 1, uniformCubes, fullDict);
+            char[][] grid = manager.getBoard();
+            assertEquals(5, grid.length);
+            for (char[] row : grid) {
+                assertEquals(5, row.length);
+                for (char ch : row) {
+                    assertTrue("LMNOPQ".indexOf(Character.toUpperCase(ch)) >= 0, "unexpected " + ch);
                 }
             }
         }
 
-        visited[r][c] = false;
-        path.remove(path.size() - 1);
-        return false;
+        @Test
+        @DisplayName("each cube lands on the board once")
+        void everyCubeUsedOnce() throws IOException {
+            String solidCubes = writeTemp(List.of("WWWWWW", "XXXXXX", "YYYYYY", "ZZZZZZ"));
+            manager.newGame(2, 1, solidCubes, fullDict);
+            Set<Character> seen = new HashSet<>();
+            for (char[] row : manager.getBoard()) {
+                for (char ch : row) {
+                    seen.add(Character.toUpperCase(ch));
+                }
+            }
+            assertEquals(Set.of('W', 'X', 'Y', 'Z'), seen);
+        }
+
+        @Test
+        @DisplayName("newGame clears scores, found words, and last path")
+        void newGameStartsFresh() throws IOException {
+            assertEquals(1, manager.addWord("stop", 0));
+            manager.newGame(4, 3, uniformCubes, fullDict);
+            assertArrayEquals(new int[3], manager.getScores());
+            assertNull(manager.getLastAddedWord());
+            manager.setGame(GRID);
+            assertEquals(1, manager.addWord("stop", 0));
+        }
+
+        @Test
+        @DisplayName("newGame rejects bad sizes, players, and cube files")
+        void newGameValidation() throws IOException {
+            String tooFew = writeTemp(Collections.nCopies(3, "LMNOPQ"));
+            String absent = nonexistentPath("cubes");
+            assertThrows(IllegalArgumentException.class, () -> manager.newGame(4, 0, uniformCubes, fullDict));
+            assertThrows(IllegalArgumentException.class, () -> manager.newGame(0, 1, uniformCubes, fullDict));
+            assertThrows(IllegalArgumentException.class, () -> manager.newGame(2, 1, tooFew, fullDict));
+            assertThrows(IOException.class, () -> manager.newGame(4, 1, absent, fullDict));
+        }
+
+        @Test
+        @DisplayName("board is copied both into setGame and out of getBoard")
+        void boardIsDefensivelyCopied() {
+            char[][] snapshot = manager.getBoard();
+            for (int r = 0; r < GRID.length; r++) {
+                assertArrayEquals(GRID[r], snapshot[r], "row " + r);
+            }
+            snapshot[1][1] = 'Q';
+            assertEquals('A', manager.getBoard()[1][1]);
+
+            char[][] tiny = {{'G', 'H'}, {'J', 'K'}};
+            manager.setGame(tiny);
+            tiny[1][0] = 'Q';
+            assertEquals('J', manager.getBoard()[1][0]);
+        }
+
+        @Test
+        @DisplayName("setGame rejects null, empty, ragged, and non-square boards")
+        void setGameValidation() {
+            assertThrows(IllegalArgumentException.class, () -> manager.setGame(null));
+            assertThrows(IllegalArgumentException.class, () -> manager.setGame(new char[0][0]));
+            assertThrows(IllegalArgumentException.class, () -> manager.setGame(new char[][]{{'A', 'B'}, {'C'}}));
+            assertThrows(IllegalArgumentException.class, () -> manager.setGame(new char[][]{{'A', 'B', 'C'}, {'D', 'E', 'F'}}));
+        }
+
+        @Test
+        @DisplayName("setGame clears scores, found words, and last path")
+        void setGameStartsFresh() {
+            assertEquals(1, manager.addWord("stop", 0));
+            assertEquals(2, manager.addWord("stone", 1));
+            manager.setGame(GRID);
+            assertArrayEquals(new int[2], manager.getScores());
+            assertNull(manager.getLastAddedWord());
+            assertEquals(1, manager.addWord("stop", 0));
+        }
+
+        @Test
+        @DisplayName("a lowercase board plays the same as uppercase")
+        void lowercaseBoard() {
+            char[][] lower = new char[GRID.length][];
+            for (int r = 0; r < GRID.length; r++) {
+                lower[r] = String.valueOf(GRID[r]).toLowerCase().toCharArray();
+            }
+            manager.setGame(lower);
+            assertEquals(1, manager.addWord("stop", 0));
+            assertEquals(TRACEABLE, new HashSet<>(manager.getAllWords()));
+        }
+    }
+
+    @Nested
+    @DisplayName("Adding words")
+    class AddingWords {
+
+        @Test
+        @DisplayName("each word scores its length minus three")
+        void scoring() {
+            int expectedTotal = 0;
+            for (String word : TRACEABLE) {
+                int earned = manager.addWord(word, 1);
+                assertEquals(word.length() - 3, earned, word);
+                expectedTotal += earned;
+            }
+            assertArrayEquals(new int[]{0, expectedTotal}, manager.getScores());
+        }
+
+        @Test
+        @DisplayName("invalid words and players earn nothing")
+        void rejections() {
+            assertEquals(0, manager.addWord("top", 0));
+            assertEquals(0, manager.addWord("", 0));
+            assertEquals(0, manager.addWord(null, 0));
+            assertEquals(0, manager.addWord("pots", 0));
+            assertEquals(0, manager.addWord("quiz", 0));
+            assertEquals(0, manager.addWord("mask", 0));
+            assertEquals(0, manager.addWord("lump", 0));
+            assertEquals(0, manager.addWord("rare", 0));
+            assertEquals(0, manager.addWord("stop", -1));
+            assertEquals(0, manager.addWord("stop", 2));
+            assertArrayEquals(new int[2], manager.getScores());
+        }
+
+        @Test
+        @DisplayName("same player cannot score a word twice, in any case")
+        void noDoubleScoring() {
+            assertEquals(1, manager.addWord("tarn", 0));
+            assertEquals(0, manager.addWord("tarn", 0));
+            assertEquals(0, manager.addWord("TARN", 0));
+            assertArrayEquals(new int[]{1, 0}, manager.getScores());
+        }
+
+        @Test
+        @DisplayName("getScores returns a copy")
+        void scoresAreCopied() {
+            manager.addWord("tarn", 0);
+            int[] leaked = manager.getScores();
+            leaked[0] = 999;
+            assertArrayEquals(new int[]{1, 0}, manager.getScores());
+        }
+
+        @Test
+        @DisplayName("players are tracked independently; case and spacing ignored")
+        void independentPlayers() {
+            assertEquals(1, manager.addWord("pond", 0));
+            assertEquals(1, manager.addWord("pond", 1));
+            assertEquals(2, manager.addWord("ToNeR", 0));
+            assertEquals(1, manager.addWord("  lair  ", 1));
+            assertArrayEquals(new int[]{3, 2}, manager.getScores());
+        }
+
+        @Test
+        @DisplayName("last added word is always a legal path")
+        void pathsAreLegal() {
+            for (String word : TRACEABLE) {
+                assertTrue(manager.addWord(word, 0) > 0, word);
+                checkPath(GRID, word, manager.getLastAddedWord());
+            }
+        }
+
+        @Test
+        @DisplayName("last added word has exact (row, col) points and ignores failures")
+        void exactPathSurvivesFailures() {
+            assertNull(manager.getLastAddedWord());
+            manager.addWord("pond", 0);
+            List<Point> expected = List.of(new Point(0, 3), new Point(0, 2), new Point(1, 2), new Point(2, 3));
+            assertEquals(expected, manager.getLastAddedWord());
+            manager.addWord("quiz", 0);
+            manager.addWord("pond", 0);
+            assertEquals(expected, manager.getLastAddedWord());
+        }
+    }
+
+    @Nested
+    @DisplayName("Finding all words")
+    class FindingAll {
+
+        @Test
+        @DisplayName("both tactics and null find every word with no duplicates")
+        void allTacticsMatch() {
+            manager.addWord("stop", 0);
+            manager.addWord("stone", 1);
+            assertEquals(TRACEABLE, new HashSet<>(manager.getAllWords()));
+            BoggleGame.SearchTactic[] tactics = {
+                    BoggleGame.SearchTactic.SEARCH_DICT, BoggleGame.SearchTactic.SEARCH_BOARD, null};
+            for (BoggleGame.SearchTactic tactic : tactics) {
+                manager.setSearchTactic(tactic);
+                Collection<String> found = manager.getAllWords();
+                assertEquals(TRACEABLE, new HashSet<>(found), "tactic " + tactic);
+                assertEquals(TRACEABLE.size(), found.size(), "duplicates under " + tactic);
+            }
+        }
+
+        @Test
+        @DisplayName("tiny boards with no words")
+        void barrenBoards() {
+            for (BoggleGame.SearchTactic tactic : BoggleGame.SearchTactic.values()) {
+                manager.setSearchTactic(tactic);
+                manager.setGame(new char[][]{{'Q', 'Q'}, {'Q', 'Q'}});
+                assertTrue(manager.getAllWords().isEmpty(), tactic.name());
+                manager.setGame(new char[][]{{'S'}});
+                assertTrue(manager.getAllWords().isEmpty(), tactic.name());
+                assertEquals(0, manager.addWord("stop", 0));
+            }
+        }
+
+        @Test
+        @DisplayName("tactics agree on random boards, and every found word can be added")
+        void randomBoardsAgree() throws IOException {
+            String mixedCubes = writeTemp(Collections.nCopies(25, "ADEILMNOPRSTU"));
+            for (int round = 0; round < 20; round++) {
+                manager.newGame(round % 2 == 0 ? 5 : 4, 1, mixedCubes, fullDict);
+                manager.setSearchTactic(BoggleGame.SearchTactic.SEARCH_DICT);
+                Set<String> viaDict = new HashSet<>(manager.getAllWords());
+                manager.setSearchTactic(BoggleGame.SearchTactic.SEARCH_BOARD);
+                assertEquals(viaDict, new HashSet<>(manager.getAllWords()), "round " + round);
+                for (String word : viaDict) {
+                    assertTrue(manager.addWord(word, 0) > 0, word + " found but not addable");
+                }
+            }
+        }
     }
 }
